@@ -1,8 +1,14 @@
 import os
-from fastapi import FastAPI
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from bson import ObjectId
 
-app = FastAPI()
+from database import db, create_document, get_documents
+from schemas import Product, Order, NewsletterSubscriber, BlogPost
+
+app = FastAPI(title="STOUSH API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,57 +18,115 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+# Utility
+class IdModel(BaseModel):
+    id: str
+
+
+def oid(id_str: str) -> ObjectId:
+    try:
+        return ObjectId(id_str)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid id")
+
+
+@app.get("/")
+def root():
+    return {"brand": "STOUSH", "tagline": "Start Something"}
+
+
+# Catalog
+@app.get("/products", response_model=List[Product])
+def list_products(category: Optional[str] = None, featured: Optional[bool] = None):
+    q: dict = {}
+    if category:
+        q["category"] = category
+    if featured is not None:
+        q["featured"] = featured
+    items = get_documents("product", q)
+    for it in items:
+        it.pop("_id", None)
+    return items
+
+
+@app.get("/products/{handle}", response_model=Product)
+def get_product(handle: str):
+    docs = get_documents("product", {"handle": handle})
+    if not docs:
+        raise HTTPException(status_code=404, detail="Product not found")
+    doc = docs[0]
+    doc.pop("_id", None)
+    return doc
+
+
+@app.post("/products", response_model=IdModel)
+def create_product(p: Product):
+    new_id = create_document("product", p)
+    return {"id": new_id}
+
+
+# Newsletter
+@app.post("/newsletter", response_model=IdModel)
+def subscribe(n: NewsletterSubscriber):
+    new_id = create_document("newslettersubscriber", n)
+    return {"id": new_id}
+
+
+# Orders (placeholder create; payment handled client-side with Stripe/PayPal SDKs)
+@app.post("/orders", response_model=IdModel)
+def create_order(order: Order):
+    new_id = create_document("order", order)
+    return {"id": new_id}
+
+
+# Shipping calculator (simple flat-rate example; replace with real rates later)
+class ShippingQuote(BaseModel):
+    country: str
+    subtotal: float
+    shipping: float
+    currency: str = "AUD"
+
+@app.get("/shipping/calc", response_model=ShippingQuote)
+def calc_shipping(country: str = "AU", subtotal: float = 0.0):
+    country = country.upper()
+    if country == "AU":
+        shipping = 0.0 if subtotal >= 150 else 9.99
+    else:
+        shipping = 0.0 if subtotal >= 300 else 24.99
+    return ShippingQuote(country=country, subtotal=subtotal, shipping=shipping)
+
+
+# Blog basic endpoints
+@app.get("/blog", response_model=List[BlogPost])
+def list_posts():
+    posts = get_documents("blogpost", {"published": True})
+    for p in posts:
+        p.pop("_id", None)
+    return posts
+
+@app.post("/blog", response_model=IdModel)
+def create_post(post: BlogPost):
+    new_id = create_document("blogpost", post)
+    return {"id": new_id}
+
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
+    resp = {
+        "backend": "running",
+        "database": "not connected",
         "collections": []
     }
-    
     try:
-        # Try to import database module
-        from database import db
-        
         if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+            resp["database"] = "connected"
+            resp["collections"] = db.list_collection_names()[:10]
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+        resp["database"] = f"error: {str(e)[:60]}"
+    resp["database_url"] = "set" if os.getenv("DATABASE_URL") else "not set"
+    resp["database_name"] = "set" if os.getenv("DATABASE_NAME") else "not set"
+    return resp
 
 
 if __name__ == "__main__":
